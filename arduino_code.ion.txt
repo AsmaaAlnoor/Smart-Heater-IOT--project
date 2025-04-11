@@ -1,0 +1,127 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+// إعدادات WiFi
+const char* ssid = "Smasm";  // اسم الشبكة
+const char* password = "711811911";  // كلمة المرور
+
+// إعدادات ThingSpeak
+const char* apiKey = "VUS4KHABJ6WUUBCK";  
+const char* readApiKey = "PAD55BPRYPTVF8P2";
+const char* server = "http://api.thingspeak.com";
+
+// تعريف حساس الحرارة DS18B20
+#define ONE_WIRE_BUS 13   
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+
+// تعريف المنافذ
+#define RELAY_PIN 14   
+#define TRIG_PIN 5    
+#define ECHO_PIN 18    
+
+// المتغيرات
+int targetTemperature = 50;   // درجة الحرارة المطلوبة
+float currentTemperature = 0.0; // درجة الحرارة الحالية
+bool heaterState = false;  // حالة السخان
+
+// دالة حساب مستوى الماء
+float getWaterLevel() {
+    digitalWrite(TRIG_PIN, LOW);
+    delayMicroseconds(2);
+    digitalWrite(TRIG_PIN, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(TRIG_PIN, LOW);
+
+    long duration = pulseIn(ECHO_PIN, HIGH);
+    float distance = (duration * 0.0343) / 2; // تحويل الزمن إلى مسافة
+    return distance;
+}
+
+// تحديث درجة الحرارة
+void updateTemperature() {
+    sensors.requestTemperatures();
+    currentTemperature = sensors.getTempCByIndex(0);
+}
+
+// إرسال البيانات إلى ThingSpeak
+void sendDataToThingSpeak() {
+    HTTPClient http;
+    String url = String(server) + "/update?api_key=" + apiKey + 
+                 "&field1=" + String(currentTemperature) + 
+                 "&field2=" + String(getWaterLevel()) + 
+                 "&field3=" + String(heaterState ? 1 : 0);
+
+    http.begin(url);
+    int httpCode = http.GET();
+    http.end();
+
+    Serial.println("تم إرسال البيانات إلى ThingSpeak");
+}
+
+// قراءة درجة الحرارة المطلوبة وحالة السخان من ThingSpeak
+void getDataFromThingSpeak() {
+    HTTPClient http;
+    String url = String(server) + "/channels/2830446/feeds/last.json?api_key=" + readApiKey;
+    
+    http.begin(url);
+    int httpCode = http.GET();
+    
+    if (httpCode > 0) {
+        String payload = http.getString();
+        int tempIndex = payload.indexOf("\"field4\":\"") + 9;
+        int heaterIndex = payload.indexOf("\"field5\":\"") + 9;
+
+        if (tempIndex > 8 && heaterIndex > 8) {
+            targetTemperature = payload.substring(tempIndex, payload.indexOf("\"", tempIndex)).toInt();
+            heaterState = payload.substring(heaterIndex, payload.indexOf("\"", heaterIndex)).toInt() == 1;
+        }
+    }
+    http.end();
+}
+
+void setup() {
+    Serial.begin(115200);
+    WiFi.begin(ssid, password);
+
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(1000);
+        Serial.println("Connecting to WiFi...");
+    }
+    Serial.println("Connected to WiFi");
+
+    pinMode(RELAY_PIN, OUTPUT);
+    pinMode(TRIG_PIN, OUTPUT);
+    pinMode(ECHO_PIN, INPUT);
+    digitalWrite(RELAY_PIN, LOW);
+
+    sensors.begin();
+}
+
+void loop() {
+    updateTemperature();
+    float waterLevel = getWaterLevel();
+
+    getDataFromThingSpeak();
+
+    // التحكم في السخان
+    if (waterLevel < 5) {
+        digitalWrite(RELAY_PIN, LOW);
+        heaterState = false;
+    } else if (heaterState && currentTemperature < targetTemperature) {
+        digitalWrite(RELAY_PIN, HIGH);
+    } else {
+        digitalWrite(RELAY_PIN, LOW);
+        heaterState = false;
+    }
+
+    sendDataToThingSpeak();
+
+    Serial.print("درجة الحرارة: "); Serial.println(currentTemperature);
+    Serial.print("مستوى الماء: "); Serial.println(waterLevel);
+    Serial.print("حالة السخان: "); Serial.println(heaterState);
+
+    delay(10000);
+}
